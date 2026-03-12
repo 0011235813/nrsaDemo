@@ -1,136 +1,202 @@
-# nrsaDemo
+# nrsaqaapp
 
-An R package containing a Shiny application for reviewing and summarising
-**National Rivers and Streams Assessment (NRSA)** habitat field data collected
-by the Oklahoma Water Resources Board.
+> A Shiny application for quality assurance review of **National Rivers and Streams Assessment (NRSA)** monitoring data.
+
+<!-- badges: start -->
+[![R-CMD-check](https://github.com/0011235813/nrsaqaapp_TEST/actions/workflows/R-CMD-check.yaml/badge.svg)](https://github.com/0011235813/nrsaqaapp_TEST/actions/workflows/R-CMD-check.yaml)
+[![Lifecycle: experimental](https://img.shields.io/badge/lifecycle-experimental-orange.svg)](https://lifecycle.r-lib.org/articles/stages.html#experimental)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+<!-- badges: end -->
 
 ---
 
-## Features
+## Overview
 
-- **Dual data sources** — load data from Excel files (`.xlsx` / `.xls`) or
-  connect directly to an AWQMS database via ODBC
-- **Filters** — date range, protocol (NRSA or State), and project selection
-  presented at load time inside the data-source modal
-- **Summary tab** — site-visit table with transect-completeness indicators
-  (✔ / ✖) and one-click CSV / Excel export
-- **Site Map tab** — interactive Leaflet map; clicking a map marker selects
-  the matching row in the summary table and vice-versa
-- **AWQMS helpers** — a set of exported functions (`awqms_connect`,
-  `awqms_tbl`, `awqms_get_results_standard_filtered`, …) that can be used
-  independently of the Shiny app
+`nrsaqaapp` helps state environmental agencies QA-review NRSA field data before submission. It supports data loading from **Excel file upload** or a direct **AWQMS ODBC connection**, and provides four review tabs:
+
+| Tab | What it does |
+|-----|-------------|
+| **Summary** | Site-visit overview — record counts, transect completeness, date range |
+| **Site Map** | Interactive map with popup details per site |
+| **QA Review** | Per-visit quality score, missing values, outliers, flagged records |
+| **Batch QA** | QA metrics across every visit in the filtered dataset at once |
 
 ---
 
 ## Installation
 
 ```r
-# install.packages("pak")  # if needed
-pak::pkg_install("your-github-username/nrsaDemo")
+# Requires the remotes package
+install.packages("remotes")
+
+# Install nrsaqaapp from GitHub
+remotes::install_github("0011235813/nrsaqaapp_TEST")
 ```
 
-Or with `remotes`:
-
-```r
-remotes::install_github("your-github-username/nrsaDemo")
-```
-
-### System requirements
-
-The AWQMS connection path requires:
-
-- A **SQL Server ODBC driver** installed on your machine.  
-  On Windows the built-in `"SQL Server"` driver works; on macOS/Linux install
-  [Microsoft ODBC Driver 17/18](https://learn.microsoft.com/sql/connect/odbc/download-odbc-driver-for-sql-server).
-- Network access to `owrb.gselements.com:1433`.
+> **Requirements:** R ≥ 4.1.0. All package dependencies are installed automatically.
 
 ---
 
-## Credential setup
+## Quick Start
 
-Credentials are resolved in this order:
+### Mode 1 — File upload (no database required)
 
-1. **keyring** (recommended — survives R restarts, never stored in plain text):
-
-   ```r
-   keyring::key_set(service = "awqms_credentials", username = "oklahomawrb")
-   # Enter your password at the prompt
-   ```
-
-2. **Environment variables** (useful in CI / server deployments):
-
-   ```sh
-   AWQMS_UID=oklahomawrb
-   AWQMS_PWD=your_password
-   ```
-
-   Add these to your `.Renviron` (`usethis::edit_r_environ()`) or to the
-   server environment before launching the app.
-
----
-
-## Running the app
+Works out of the box for any agency. Upload one or more `.xlsx` or `.xls`
+files exported from AWQMS or any system that follows the
+`results_standard_vw` column schema.
 
 ```r
-library(nrsaDemo)
+library(nrsaqaapp)
 run_app()
 ```
 
-Optional arguments are forwarded to `shiny::runApp()`:
+### Mode 2 — AWQMS / ODBC connection (OWRB)
+
+The package includes the OWRB AWQMS connection script. It is loaded
+automatically when the package is installed — no extra setup needed.
 
 ```r
-run_app(port = 4321, launch.browser = FALSE)
+library(nrsaqaapp)
+run_app()
+```
+
+Click **Connect to AWQMS** in the startup dialog, enter a date range,
+and click **Connect & Load**.
+
+> Credentials are stored securely in the Windows keyring — never in code
+> or config files. On first use, run:
+> ```r
+> keyring::key_set(service = "awqms_credentials", username = "oklahomawrb")
+> ```
+> A popup will ask for your password. This only needs to be done once per machine.
+
+### Mode 3 — AWQMS / ODBC connection (other agencies)
+
+Supply the path to your own AWQMS connection script. The script must define
+two functions: `awqms_get_con()` which returns an open DBI connection, and
+`awqms_disconnect()` which closes it.
+
+```r
+library(nrsaqaapp)
+run_app(awqms_script = "C:/path/to/your/AWQMS_connection_script.R")
+```
+
+To avoid typing the path every session, add it to your `.Renviron`:
+
+```r
+# Open your .Renviron file
+file.edit("~/.Renviron")
+```
+
+Then add:
+
+```
+NRSA_AWQMS_SCRIPT=C:/path/to/your/AWQMS_connection_script.R
+```
+
+And update your `run_app()` call to:
+
+```r
+run_app(awqms_script = Sys.getenv("NRSA_AWQMS_SCRIPT"))
 ```
 
 ---
 
-## Using the AWQMS helpers directly
+## Data Requirements
 
-```r
-library(nrsaDemo)
+The app expects data aligned to the **`results_standard_vw`** schema.
+When uploading Excel files, column names are automatically snake-cased
+and common synonyms are mapped.
 
-# One-shot filtered pull
-df <- awqms_get_results_standard_filtered(
-  start_date = "2023-01-01",
-  end_date   = "2023-12-31",
-  protocol   = "NRSA Protocol",
-  projects   = c("FWProb23-27", "FWTrend")
-)
+### Key columns
 
-# Low-level access via a cached connection
-con <- awqms_get_con()
-dplyr::tbl(con, "results_standard_vw") %>% dplyr::glimpse()
-awqms_disconnect()
+| Column | Description |
+|--------|-------------|
+| `monitoring_location_id` | Site identifier |
+| `activity_start_date` | Sample date (ISO, M/D/YYYY, D-Mon-YYYY, or Excel serial) |
+| `sampling_component_name` | Transect letter (A–K) |
+| `characteristic_name` | Parameter name |
+| `result_measure` | Numeric result value |
+| `parent_activity_id` | Visit group (derived from `activity_id`) |
+| `project_id1` … `project_id6` | Project identifiers |
+
+### NRSA Project IDs
+
+Records are filtered to visits containing at least one of these project IDs
+across `project_id1`–`project_id6`:
+
+```
+FWProb08-12   FWProb13-17   FWProb18-22   FWProb23-27
+FWTrend       FWFire2019    FWProbAll     AncillaryHabitat   NRSA-Data
 ```
 
 ---
 
-## Package structure
+## Adapting for Your Agency
+
+Most agencies only need to supply their own AWQMS connection script via
+`run_app(awqms_script = ...)` as shown above. The rest of the app works
+without modification.
+
+To customise QA rules or thresholds:
+
+| What to change | Where |
+|---------------|-------|
+| QA parameter ranges | `PARAMETER_QA_RULES` in `R/constants.R` |
+| Expected transects | `compute_transect_summary()` in `R/fct_qa.R` |
+| NRSA project IDs | `NRSA_PROJECT_IDS` in `R/constants.R` |
+| Column name synonyms | `synonym_map` in `R/fct_data.R` |
+
+---
+
+## Package Structure
 
 ```
-nrsaDemo/
+nrsaqaapp/
 ├── R/
-│   ├── awqms.R        # AWQMS connection & query helpers (exported)
-│   └── run_app.R      # run_app() entry point
-├── inst/
-│   └── app/
-│       ├── app.R      # Shiny ui / server
-│       └── R/
-│           └── helpers.R   # Data-processing & UI helpers (app-internal)
+│   ├── constants.R          # Column names, project IDs, QA rules
+│   ├── utils.R              # %||%, safe_date, safe_min_date, to_snake_case
+│   ├── fct_data.R           # Data loading, coercion, harmonization
+│   ├── fct_qa.R             # Outlier detection, scoring, QA flags
+│   ├── fct_db.R             # AWQMS connection helpers
+│   ├── mod_data_source.R    # Module: startup + upload + ODBC modals
+│   ├── mod_summary.R        # Module: Summary tab
+│   ├── mod_map.R            # Module: Site Map tab
+│   ├── mod_qa_review.R      # Module: QA Review tab
+│   ├── mod_batch_qa.R       # Module: Batch QA tab
+│   ├── app_ui.R             # Top-level UI
+│   ├── app_server.R         # Top-level server
+│   └── run_app.R            # run_app() entry point
+├── inst/awqms/
+│   └── AWQMS_Source_Code.R  # Bundled OWRB connection script (no credentials)
+├── tests/testthat/          # Unit tests
 ├── DESCRIPTION
-├── NAMESPACE
 └── README.md
 ```
 
 ---
 
+## Running Tests
+
+```r
+devtools::test()
+```
+
+Tests cover all pure helper functions in `R/fct_data.R`, `R/fct_qa.R`,
+and `R/utils.R`.
+
+---
+
 ## Contributing
 
-Pull requests are welcome. Please open an issue first to discuss any
-significant changes.
+Pull requests are welcome. Please open an issue first to discuss major changes.
+
+When submitting a PR:
+- Add or update tests for any new functions in `tests/testthat/`
+- Run `devtools::check()` locally before submitting
 
 ---
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT © Oklahoma Water Resources Board — see [LICENSE](LICENSE).

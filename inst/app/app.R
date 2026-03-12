@@ -1,8 +1,5 @@
 # =============================================================================
-# NRSA DEMO APPLICATION — inst/app/app.R
-# Runs via nrsaDemo::run_app()
-# AWQMS helpers are provided by the nrsaDemo package (R/awqms.R).
-# Data-processing helpers live alongside this file in R/helpers.R.
+# NRSA DEMO APPLICATION — Summary & Map only
 # =============================================================================
 
 library(shiny)
@@ -15,23 +12,11 @@ library(shinyjs)
 library(shinydashboard)
 library(readr)
 library(readxl)
-library(nrsaDemo)          # awqms_* functions
-
-# Source app-local helpers (data processing, UI pieces).
-# system.file() works whether the app is run via run_app() or directly with
-# shiny::runApp("inst/app").
-source(
-  system.file("app", "R", "helpers.R", package = "nrsaDemo",
-              mustWork = FALSE) |>
-    (\(p) if (nzchar(p)) p else file.path("R", "helpers.R"))(),
-  local = TRUE
-)
 
 options(shiny.maxRequestSize = 5 * 1024^3)
 
-# -----------------------------------------------------------------------------
-# COLUMN NAME CONSTANTS
-# -----------------------------------------------------------------------------
+source("C:/Users/364483.AGENCY/OneDrive - State of Oklahoma/Documents/R code/NRSA App 3/AWQMS_Source_Code_02262026_v3.R")
+
 COL_SITE     <- "monitoring_location_id"
 COL_DATE     <- "activity_start_date"
 COL_LAT      <- "monitoring_location_latitude"
@@ -50,6 +35,183 @@ NRSA_PROJECT_IDS <- c(
 
 `%||%` <- function(a, b) if (!is.null(a)) a else b
 
+add_project_col <- function(data) {
+  present <- intersect(PROJECT_COLS, names(data))
+  if (length(present) == 0) { data$project_id <- NA_character_; return(data) }
+  data$project_id <- apply(data[, present, drop = FALSE], 1, function(r) {
+    v <- r[!is.na(r) & nchar(trimws(r)) > 0]
+    if (length(v)) v[[1]] else NA_character_
+  })
+  data
+}
+
+coerce_dates <- function(data) {
+  if (COL_DATE %in% names(data) && !inherits(data[[COL_DATE]], "Date"))
+    data[[COL_DATE]] <- as.Date(data[[COL_DATE]])
+  data
+}
+
+coerce_numeric <- function(data) {
+  if (COL_VALUE %in% names(data)) {
+    v <- data[[COL_VALUE]]
+    if (is.list(v)) v <- unlist(v)
+    if (!is.numeric(v))
+      v <- suppressWarnings(as.numeric(gsub("^[<>]=?\\s*", "", as.character(v))))
+    data[[COL_VALUE]] <- v
+  }
+  data
+}
+
+compute_transect_summary <- function(data) {
+  expected <- paste(LETTERS[1:11], collapse = "-")
+  data %>%
+    filter(!is.na(.data[[COL_TRANSECT]]) & .data[[COL_TRANSECT]] != "") %>%
+    group_by(.data[[COL_GROUP]]) %>%
+    summarize(
+      transect_summary = paste(sort(unique(.data[[COL_TRANSECT]])), collapse = "-"),
+      .groups = "drop"
+    ) %>%
+    rename(group_id = 1) %>%
+    mutate(
+      transect_complete = ifelse(
+        transect_summary == expected,
+        "<span style='color:#2e7d32;font-weight:700;'>&#10004;</span>",
+        "<span style='color:#c62828;font-weight:700;'>&#10006;</span>"
+      )
+    )
+}
+
+odbc_columns <- c(
+  "activity_media", "monitoring_location_type", "activity_start_date",
+  "sample_collection_method_id",
+  "project_id1", "project_id2", "project_id3",
+  "project_id4", "project_id5", "project_id6",
+  "activity_id", "sampling_component_name",
+  "monitoring_location_id", "monitoring_location_name",
+  "monitoring_location_latitude", "monitoring_location_longitude",
+  "result_measure", "characteristic_name", "analytical_method_id",
+  "result_measure_unit", "method_speciation", "result_status"
+)
+
+read_uploaded_file <- function(path, name) {
+  ext <- tolower(tools::file_ext(name))
+  if (ext %in% c("xlsx", "xls"))
+    readxl::read_excel(path, col_types = "text")
+  else
+    stop(sprintf("Unsupported file type: .%s — please upload .xlsx or .xls files only", ext))
+}
+
+to_snake_case <- function(x) {
+  x <- tolower(x)
+  x <- gsub("[^a-z0-9]+", "_", x)
+  x <- gsub("_+", "_", x)
+  x <- gsub("^_|_$", "", x)
+  x
+}
+
+harmonize_to_odbc_schema <- function(df) {
+  names(df) <- to_snake_case(names(df))
+  synonym_map <- c(
+    sampling_component_quadrat = "sampling_component_name",
+    result_value               = "result_measure",
+    activity_latitude          = "activity_latitude",
+    activity_longitude         = "activity_longitude"
+  )
+  for (src in names(synonym_map)) {
+    dest <- synonym_map[[src]]
+    if (src %in% names(df) && !(dest %in% names(df)))
+      names(df)[names(df) == src] <- dest
+  }
+  if (!("monitoring_location_latitude" %in% names(df)) && "activity_latitude" %in% names(df))
+    df$monitoring_location_latitude <- df$activity_latitude
+  if (!("monitoring_location_longitude" %in% names(df)) && "activity_longitude" %in% names(df))
+    df$monitoring_location_longitude <- df$activity_longitude
+  for (col in setdiff(odbc_columns, names(df)))
+    df[[col]] <- NA
+  df
+}
+
+normalize_core_types <- function(df) {
+  if ("activity_start_date" %in% names(df)) {
+    raw <- df$activity_start_date
+    parsed <- suppressWarnings({
+      out <- as.Date(raw, format = "%Y-%m-%d")
+      na_idx <- is.na(out) & !is.na(raw) & nchar(trimws(raw)) > 0
+      if (any(na_idx)) out[na_idx] <- as.Date(raw[na_idx], format = "%m/%d/%Y")
+      na_idx <- is.na(out) & !is.na(raw) & nchar(trimws(raw)) > 0
+      if (any(na_idx)) out[na_idx] <- as.Date(raw[na_idx], format = "%d-%b-%Y")
+      na_idx <- is.na(out) & !is.na(raw) & nchar(trimws(raw)) > 0
+      if (any(na_idx)) {
+        serial <- suppressWarnings(as.numeric(raw[na_idx]))
+        valid  <- !is.na(serial)
+        if (any(valid))
+          out[na_idx][valid] <- as.Date(serial[valid] - 1, origin = "1899-12-30")
+      }
+      out
+    })
+    failed_mask <- is.na(parsed) & !is.na(raw) & nchar(trimws(raw)) > 0
+    if (any(failed_mask))
+      attr(df, "date_parse_failures") <- list(
+        n       = sum(failed_mask),
+        samples = head(unique(raw[failed_mask]), 10)
+      )
+    df$activity_start_date <- parsed
+  }
+  for (col in c("monitoring_location_latitude", "monitoring_location_longitude"))
+    if (col %in% names(df))
+      df[[col]] <- suppressWarnings(as.numeric(df[[col]]))
+  df
+}
+
+safe_awqms_connect <- function() {
+  tryCatch(awqms_get_con(), error = function(e) {
+    showNotification(paste("ODBC connection failed:", conditionMessage(e)),
+                     type = "error", duration = 10)
+    NULL
+  })
+}
+safe_awqms_disconnect <- function(con) {
+  if (!is.null(con)) suppressWarnings(try(awqms_disconnect(), silent = TRUE))
+}
+
+safe_date <- function(x) {
+  if (is.null(x) || length(x) == 0 || is.na(x)) return(NULL)
+  if (is.character(x) && nchar(trimws(x)) == 0) return(NULL)
+  d <- suppressWarnings(as.Date(x))
+  if (is.na(d)) NULL else d
+}
+
+# =============================================================================
+# SHARED FILTER PANEL UI HELPER
+# Returns the date range / protocol / project controls for use inside modals.
+# `id_suffix` keeps input IDs unique across the two modal contexts.
+# =============================================================================
+filter_panel_ui <- function(id_suffix = "", include_dates = TRUE) {
+  div(
+    style = "background-color:#f5f5f5;padding:15px;border-radius:6px;margin-top:10px;",
+    tags$strong(icon("filter"), " Filter Options"),
+    br(), br(),
+    if (include_dates) fluidRow(
+      column(6, dateInput(paste0("start_date", id_suffix), "Start Date", value = NULL)),
+      column(6, dateInput(paste0("end_date",   id_suffix), "End Date",   value = NULL))
+    ),
+    fluidRow(
+      column(6,
+             selectInput(paste0("protocol", id_suffix), "Protocol",
+                         choices  = c("NRSA Protocol", "State Protocol"),
+                         selected = "NRSA Protocol")),
+      column(6,
+             pickerInput(paste0("project", id_suffix), "Project",
+                         choices = sort(NRSA_PROJECT_IDS),
+                         selected = sort(NRSA_PROJECT_IDS),
+                         multiple = TRUE,
+                         options  = list(`actions-box` = TRUE,
+                                         `live-search` = TRUE,
+                                         `selected-text-format` = "count > 3")))
+    )
+  )
+}
+
 # =============================================================================
 # UI
 # =============================================================================
@@ -62,7 +224,7 @@ ui <- dashboardPage(
                    style = "margin-top:8px;margin-right:10px;", title = "Help")
     )
   ),
-
+  
   dashboardSidebar(
     collapsed = TRUE,
     sidebarMenu(
@@ -72,16 +234,16 @@ ui <- dashboardPage(
       menuItem("Add Files / Switch Data Source", tabName = "source",  icon = icon("database"))
     )
   ),
-
+  
   dashboardBody(
     useShinyjs(),
-
+    
     tags$head(tags$style(HTML("
       .btn-header { background-color:transparent; border:none; color:white; font-size:18px; }
       .btn-header:hover { background-color:rgba(255,255,255,0.1); }
       .content-wrapper { padding-bottom:50px; }
     "))),
-
+    
     tags$script(HTML("
       $(function(){
         $(document).on('keydown', function(e){
@@ -89,9 +251,9 @@ ui <- dashboardPage(
         });
       });
     ")),
-
+    
     tabItems(
-
+      
       # ── Summary ──────────────────────────────────────────────────────────────
       tabItem(tabName = "summary",
               uiOutput("connection_status"),
@@ -100,7 +262,7 @@ ui <- dashboardPage(
               br(),
               DTOutput("summary_table", width = "100%")
       ),
-
+      
       # ── Map ───────────────────────────────────────────────────────────────────
       tabItem(tabName = "map",
               div(style = "margin-bottom:8px;",
@@ -109,10 +271,10 @@ ui <- dashboardPage(
                                class = "btn-sm btn-default")),
               leafletOutput("site_map", height = 580)
       ),
-
+      
       tabItem(tabName = "source")  # handled entirely via modal
     ),
-
+    
     uiOutput("status_bar")
   )
 )
@@ -121,7 +283,7 @@ ui <- dashboardPage(
 # SERVER
 # =============================================================================
 server <- function(input, output, session) {
-
+  
   # ---------------------------------------------------------------------------
   # Reactive state
   # ---------------------------------------------------------------------------
@@ -131,17 +293,22 @@ server <- function(input, output, session) {
   pending_combined <- reactiveVal(NULL)
   current_tab      <- reactiveVal("summary")
   con_obj          <- NULL
-
+  
+  # Active filter values — set when user confirms a modal
   active_filters <- reactiveValues(
     start_date = NULL,
     end_date   = NULL,
     protocol   = "NRSA Protocol",
     project    = sort(NRSA_PROJECT_IDS)
   )
-
+  
+  # ---------------------------------------------------------------------------
+  # Helper: copy filter inputs from a modal into active_filters
+  # id_suffix matches the suffix used in filter_panel_ui()
+  # ---------------------------------------------------------------------------
   apply_modal_filters <- function(id_suffix = "", start_override = NULL, end_override = NULL) {
     s <- safe_date(if (!is.null(start_override)) start_override else input[[paste0("start_date", id_suffix)]])
-    e <- safe_date(if (!is.null(end_override))   end_override   else input[[paste0("end_date",   id_suffix)]])
+    e <- safe_date(if (!is.null(end_override)) end_override else input[[paste0("end_date", id_suffix)]])
     p <- input[[paste0("protocol", id_suffix)]]
     j <- input[[paste0("project",  id_suffix)]]
     active_filters$start_date <- s
@@ -149,9 +316,9 @@ server <- function(input, output, session) {
     active_filters$protocol   <- p %||% "NRSA Protocol"
     active_filters$project    <- if (length(j) > 0) j else sort(NRSA_PROJECT_IDS)
   }
-
+  
   # ---------------------------------------------------------------------------
-  # Startup modal
+  # Startup modal  (id_suffix = "_startup")
   # ---------------------------------------------------------------------------
   observe({
     showModal(modalDialog(
@@ -160,11 +327,11 @@ server <- function(input, output, session) {
       size      = "m",
       easyClose = FALSE,
       footer    = NULL,
-
+      
       div(style = "text-align:center;margin-bottom:20px;",
           p("Please select how you would like to load your NRSA data:",
             style = "font-size:16px;color:#666;")),
-
+      
       fluidRow(
         column(6,
                actionButton("startup_upload",
@@ -189,9 +356,9 @@ server <- function(input, output, session) {
       )
     ))
   })
-
+  
   # ---------------------------------------------------------------------------
-  # Upload modal
+  # Startup → Upload modal  (id_suffix = "_upload")
   # ---------------------------------------------------------------------------
   show_upload_modal <- function() {
     showModal(modalDialog(
@@ -209,21 +376,51 @@ server <- function(input, output, session) {
       )
     ))
   }
-
+  
   observeEvent(input$startup_upload, { removeModal(); show_upload_modal() })
   observeEvent(input$choose_upload,  { removeModal(); show_upload_modal() })
-
+  
   # ---------------------------------------------------------------------------
-  # AWQMS / ODBC modal
+  # Startup → AWQMS modal  (id_suffix = "_odbc")
   # ---------------------------------------------------------------------------
   show_odbc_modal <- function() {
+    # Check if credentials are already stored in keyring
+    has_creds <- tryCatch({
+      pwd <- keyring::key_get(service = "awqms_credentials", username = "oklahomawrb")
+      !is.null(pwd) && nzchar(pwd)
+    }, error = function(e) FALSE)
+    
     showModal(modalDialog(
       title     = "Connect to AWQMS Database",
       size      = "m",
       easyClose = FALSE,
       p("Select a date range and filters, then connect to AWQMS.", style = "color:#666;"),
-      p(icon("info-circle"), " Ensure you have network access and valid credentials.",
-        style = "color:#1976d2;margin-bottom:10px;"),
+      
+      # Credential section — only shown when not yet stored in keyring
+      if (!has_creds)
+        div(style = "background-color:#fff8e1;padding:12px;border-radius:6px;margin-bottom:10px;border-left:4px solid #f9a825;",
+            tags$strong(icon("key"), " AWQMS Credentials"),
+            p("Enter your credentials once — they will be saved securely and not asked again.",
+              style = "color:#666;font-size:12px;margin:6px 0 10px 0;"),
+            fluidRow(
+              column(6, textInput("awqms_uid", "Username", placeholder = "your.username")),
+              column(6, passwordInput("awqms_pwd", "Password", placeholder = "••••••••"))
+            )
+        ),
+      
+      # If creds already stored, show a small reassurance message
+      if (has_creds)
+        div(style = "background-color:#e8f5e9;padding:8px 12px;border-radius:6px;margin-bottom:10px;",
+            icon("check-circle", style = "color:#2e7d32;"),
+            tags$span(" Credentials on file — ",
+                      tags$strong("connected as oklahomawrb"),
+                      style = "color:#2e7d32;font-size:13px;"),
+            tags$span(" | ",
+                      actionLink("reset_credentials", "Use different credentials",
+                                 style = "font-size:12px;color:#666;"),
+                      style = "color:#aaa;font-size:13px;")
+        ),
+      
       div(style = "background-color:#f0f4ff;padding:12px;border-radius:6px;margin-bottom:10px;",
           tags$strong(icon("calendar"), " Date range used to fetch data from AWQMS (required):"),
           br(), br(),
@@ -243,10 +440,10 @@ server <- function(input, output, session) {
       )
     ))
   }
-
+  
   observeEvent(input$startup_odbc, { removeModal(); show_odbc_modal() })
   observeEvent(input$choose_odbc,  { removeModal(); show_odbc_modal() })
-
+  
   # ---------------------------------------------------------------------------
   # Help modal
   # ---------------------------------------------------------------------------
@@ -275,14 +472,14 @@ server <- function(input, output, session) {
       footer = modalButton("Close")
     ))
   })
-
+  
   # ---------------------------------------------------------------------------
   # Tab tracking + Source modal (sidebar re-entry)
   # ---------------------------------------------------------------------------
   observeEvent(input$tabs, {
     req(input$tabs)
     if (input$tabs != "source") current_tab(input$tabs)
-
+    
     if (input$tabs == "source") {
       updateTabItems(session, "tabs", current_tab())
       showModal(modalDialog(
@@ -302,7 +499,7 @@ server <- function(input, output, session) {
       ))
     }
   })
-
+  
   # ---------------------------------------------------------------------------
   # Upload status preview
   # ---------------------------------------------------------------------------
@@ -312,7 +509,7 @@ server <- function(input, output, session) {
         tags$strong("Files ready:"),
         tags$ul(lapply(input$upload_files$name, tags$li)))
   })
-
+  
   # ---------------------------------------------------------------------------
   # Confirm Upload
   # ---------------------------------------------------------------------------
@@ -345,7 +542,7 @@ server <- function(input, output, session) {
         if ("monitoring_location_type" %in% names(combined))
           combined <- combined %>% filter(monitoring_location_type == "River/Stream")
         combined <- combined %>% add_project_col() %>% coerce_dates() %>% coerce_numeric()
-
+        
         if (nrow(combined) == 0) {
           showNotification(
             "No Habitat/River/Stream records found. Check activity_media and monitoring_location_type columns.",
@@ -356,14 +553,16 @@ server <- function(input, output, session) {
           dr <- range(combined[[COL_DATE]], na.rm = TRUE)
           loaded_dates(list(start = dr[1], end = dr[2]))
         }
-
+        
+        # Apply filters from the upload modal
         apply_modal_filters("_upload")
-
+        
+        # Update project picker choices to match the loaded data
         if ("project_id" %in% names(combined)) {
           projects <- sort(unique(combined$project_id[!is.na(combined$project_id)]))
           active_filters$project <- projects
         }
-
+        
         if (length(date_failures) > 0) {
           total_failed <- sum(sapply(date_failures, `[[`, "n"))
           detail_lines <- lapply(date_failures, function(f) {
@@ -394,7 +593,7 @@ server <- function(input, output, session) {
           pending_combined(combined)
           return()
         }
-
+        
         source_data(combined)
         source_mode("upload")
         removeModal()
@@ -409,7 +608,7 @@ server <- function(input, output, session) {
       }
     })
   })
-
+  
   observeEvent(input$dismiss_date_warning, {
     d <- pending_combined(); req(d)
     source_data(d); source_mode("upload"); pending_combined(NULL)
@@ -419,13 +618,13 @@ server <- function(input, output, session) {
              " records (some dates set to NA — see warning)"),
       type = "warning", duration = 8)
   })
-
+  
   observeEvent(input$abort_date_warning, {
     pending_combined(NULL); removeModal()
     showNotification("Load cancelled. Please fix the date format and re-upload.",
                      type = "error", duration = 8)
   })
-
+  
   # ---------------------------------------------------------------------------
   # ODBC date warning
   # ---------------------------------------------------------------------------
@@ -440,10 +639,20 @@ server <- function(input, output, session) {
             icon("times-circle"), " Start date must be before end date.")
     }, error = function(e) NULL)
   })
-
+  
   # ---------------------------------------------------------------------------
   # Confirm ODBC
   # ---------------------------------------------------------------------------
+  # Reset credentials link — clears keyring and reopens modal
+  observeEvent(input$reset_credentials, {
+    tryCatch(
+      keyring::key_delete(service = "awqms_credentials", username = "oklahomawrb"),
+      error = function(e) NULL
+    )
+    removeModal()
+    show_odbc_modal()
+  })
+  
   observeEvent(input$confirm_odbc, {
     start <- as.Date(input$odbc_start_date)
     end   <- as.Date(input$odbc_end_date)
@@ -451,6 +660,27 @@ server <- function(input, output, session) {
       showNotification("Start date must be before end date.", type = "warning", duration = 6)
       return()
     }
+    
+    # If user entered credentials in the form, save them to keyring first
+    uid <- input$awqms_uid
+    pwd <- input$awqms_pwd
+    if (!is.null(uid) && nzchar(trimws(uid)) &&
+        !is.null(pwd) && nzchar(trimws(pwd))) {
+      tryCatch({
+        keyring::key_set_with_value(
+          service  = "awqms_credentials",
+          username = trimws(uid),
+          password = trimws(pwd)
+        )
+        # Update the default user in AWQMS config to match what was entered
+        AWQMS$default_user <<- trimws(uid)
+      }, error = function(e) {
+        showNotification(
+          paste("Could not save credentials to keyring:", e$message),
+          type = "warning", duration = 8)
+      })
+    }
+    
     withProgress(message = "Connecting to AWQMS...", value = 0.2, {
       con_obj <<- safe_awqms_connect()
       if (is.null(con_obj)) return()
@@ -477,13 +707,16 @@ server <- function(input, output, session) {
           safe_awqms_disconnect(con_obj); con_obj <<- NULL; return()
         }
         loaded_dates(list(start = start, end = end))
+        
+        # Apply filters from the ODBC modal
         apply_modal_filters("_odbc", start_override = start, end_override = end)
-
+        
+        # Update project choices to loaded data
         if ("project_id" %in% names(data)) {
           projects <- sort(unique(data$project_id[!is.na(data$project_id)]))
           active_filters$project <- projects
         }
-
+        
         source_data(data); source_mode("odbc")
         removeModal(); updateTabItems(session, "tabs", current_tab())
         showNotification(
@@ -496,18 +729,18 @@ server <- function(input, output, session) {
       })
     })
   })
-
+  
   # ---------------------------------------------------------------------------
-  # Filtered data
+  # Filtered data  (uses active_filters reactiveValues)
   # ---------------------------------------------------------------------------
   filtered_data <- reactive({
     req(source_data())
     d  <- source_data()
     ld <- loaded_dates()
-
+    
     s_date <- active_filters$start_date %||% safe_date(ld$start)
     e_date <- active_filters$end_date   %||% safe_date(ld$end)
-
+    
     if (!is.null(s_date) && COL_DATE %in% names(d))
       d <- d %>% filter(.data[[COL_DATE]] >= s_date)
     if (!is.null(e_date) && COL_DATE %in% names(d))
@@ -516,7 +749,7 @@ server <- function(input, output, session) {
       d <- d %>% filter(project_id %in% active_filters$project)
     d
   })
-
+  
   # ---------------------------------------------------------------------------
   # Connection status banner
   # ---------------------------------------------------------------------------
@@ -535,7 +768,7 @@ server <- function(input, output, session) {
           icon("database"), " AWQMS (NRSA filter) — ",
           tags$strong(format(nrow(source_data()), big.mark = ",")), " records.")
   })
-
+  
   # ---------------------------------------------------------------------------
   # Dataset summary box
   # ---------------------------------------------------------------------------
@@ -547,7 +780,7 @@ server <- function(input, output, session) {
     n_params <- if (COL_PARAM %in% names(d)) n_distinct(d[[COL_PARAM]], na.rm = TRUE) else NA
     dr       <- if (COL_DATE %in% names(d) && any(!is.na(d[[COL_DATE]])))
       range(d[[COL_DATE]], na.rm = TRUE) else c(NA, NA)
-
+    
     div(style = "background-color:#f5f5f5;padding:15px;border-radius:4px;margin-bottom:20px;",
         h4("Dataset Summary", style = "margin-top:0;"),
         fluidRow(
@@ -572,7 +805,7 @@ server <- function(input, output, session) {
             tags$strong(format(dr[2], "%Y-%m-%d")))
     )
   })
-
+  
   # ---------------------------------------------------------------------------
   # Download buttons
   # ---------------------------------------------------------------------------
@@ -583,12 +816,12 @@ server <- function(input, output, session) {
                        style = "margin-right:10px;"),
         downloadButton("export_summary", "Export Summary (CSV)",       class = "btn-info"))
   })
-
+  
   output$export_csv <- downloadHandler(
     filename = function() paste0("NRSA_Filtered_", Sys.Date(), ".csv"),
     content  = function(file) write_csv(filtered_data(), file)
   )
-
+  
   output$export_summary <- downloadHandler(
     filename = function() paste0("NRSA_Summary_", Sys.Date(), ".csv"),
     content  = function(file) {
@@ -605,14 +838,14 @@ server <- function(input, output, session) {
         write_csv(file)
     }
   )
-
+  
   # ---------------------------------------------------------------------------
   # Summary table
   # ---------------------------------------------------------------------------
   output$summary_table <- renderDT({
     req(filtered_data())
     d <- filtered_data()
-
+    
     summary_df <- d %>%
       group_by(.data[[COL_GROUP]]) %>%
       summarize(
@@ -623,7 +856,7 @@ server <- function(input, output, session) {
         .groups = "drop"
       ) %>%
       rename(`Visit Group` = 1)
-
+    
     if (all(c(COL_TRANSECT, COL_GROUP) %in% names(d))) {
       ts <- compute_transect_summary(d)
       summary_df <- summary_df %>%
@@ -634,13 +867,13 @@ server <- function(input, output, session) {
         ) %>%
         select(-transect_summary, -transect_complete)
     }
-
+    
     datatable(summary_df, selection = "single", escape = FALSE, rownames = FALSE,
               extensions = "Buttons",
               options = list(pageLength = 25, scrollX = TRUE,
                              dom = "Bfrtip", buttons = c("copy", "csv", "excel")))
   }, server = FALSE)
-
+  
   # ---------------------------------------------------------------------------
   # Status bar
   # ---------------------------------------------------------------------------
@@ -660,7 +893,7 @@ server <- function(input, output, session) {
         )
     )
   })
-
+  
   # ---------------------------------------------------------------------------
   # Map helpers
   # ---------------------------------------------------------------------------
@@ -679,7 +912,7 @@ server <- function(input, output, session) {
       "</div>"
     )
   }
-
+  
   build_coords <- function(d) {
     d %>%
       filter(!is.na(.data[[COL_LAT]]), !is.na(.data[[COL_LON]])) %>%
@@ -701,21 +934,21 @@ server <- function(input, output, session) {
         SIMPLIFY = TRUE
       )))
   }
-
+  
   # ---------------------------------------------------------------------------
   # Site Map
   # ---------------------------------------------------------------------------
   output$site_map <- renderLeaflet({
     d <- tryCatch(filtered_data(), error = function(e) NULL)
     base <- leaflet() %>% addProviderTiles(providers$CartoDB.Positron)
-
+    
     if (is.null(d) || nrow(d) == 0 || !all(c(COL_LAT, COL_LON, COL_SITE) %in% names(d)))
       return(base %>% setView(lng = -97, lat = 36, zoom = 6))
-
+    
     coords <- tryCatch(build_coords(d), error = function(e) NULL)
     if (is.null(coords) || nrow(coords) == 0)
       return(base %>% setView(lng = -97, lat = 36, zoom = 6))
-
+    
     sel_row  <- input$summary_table_rows_selected
     sel_site <- NULL
     if (!is.null(sel_row) && length(sel_row) > 0) {
@@ -729,10 +962,10 @@ server <- function(input, output, session) {
         if (nrow(site_row) > 0) sel_site <- site_row[[COL_SITE]]
       }
     }
-
+    
     grey <- if (!is.null(sel_site)) coords[coords$site != sel_site, ] else coords
     m    <- base
-
+    
     if (nrow(grey) > 0)
       m <- m %>% addCircleMarkers(
         data = grey, lng = ~lon, lat = ~lat, layerId = ~site,
@@ -742,7 +975,7 @@ server <- function(input, output, session) {
         labelOptions = labelOptions(direction = "auto", sticky = FALSE),
         popup = ~popup
       )
-
+    
     if (!is.null(sel_site)) {
       sc <- coords[coords$site == sel_site, ]
       if (nrow(sc) > 0)
@@ -767,7 +1000,7 @@ server <- function(input, output, session) {
     }
     m
   })
-
+  
   observeEvent(input$refresh_map, {
     d <- tryCatch(filtered_data(), error = function(e) NULL)
     if (is.null(d) || nrow(d) == 0) return()
@@ -780,7 +1013,7 @@ server <- function(input, output, session) {
       )
     showNotification("View reset", type = "message", duration = 2)
   })
-
+  
   observeEvent(input$site_map_marker_click, {
     req(filtered_data())
     clicked_site <- sub("^sel_", "", input$site_map_marker_click$id)
@@ -792,14 +1025,14 @@ server <- function(input, output, session) {
     if (length(match_row) > 0)
       dataTableProxy("summary_table") %>% selectRows(match_row[1])
   })
-
+  
   # ---------------------------------------------------------------------------
   # Session cleanup
   # ---------------------------------------------------------------------------
   session$onSessionEnded(function() {
     if (!is.null(con_obj)) safe_awqms_disconnect(con_obj)
   })
-
+  
 } # end server
 
 shinyApp(ui = ui, server = server)

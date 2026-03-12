@@ -1,0 +1,36 @@
+Package: nrsaDemo
+Title: NRSA Field Data Review Application
+Version: 0.1.0
+Authors@R: 
+    person("Oklahoma Water Resources Board", role = c("aut", "cre"),
+           email = "owrb@owrb.ok.gov")
+Description: A Shiny application for reviewing and summarising National Rivers
+    and Streams Assessment (NRSA) habitat field data. Supports data loading via
+    Excel file upload or a direct ODBC connection to an AWQMS database, with
+    interactive summary tables, transect-completeness checks, and a Leaflet site
+    map.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.1
+Depends:
+    R (>= 4.1.0)
+Imports:
+    shiny (>= 1.7.0),
+    dplyr (>= 1.1.0),
+    dbplyr,
+    DBI,
+    odbc,
+    keyring,
+    rlang
+Suggests:
+    shinyWidgets,
+    shinydashboard,
+    shinyjs,
+    htmltools,
+    DT,
+    leaflet,
+    readr,
+    readxl,
+    testthat (>= 3.0.0)
+Config/testthat/edition: 3

@@ -1,0 +1,30 @@
+# R
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+*.Rproj
+
+# Package build artefacts
+/doc/
+/Meta/
+/man/
+src/*.o
+src/*.so
+src/*.dll
+
+# R Check
+/nrsaDemo.Rcheck/
+
+# Compiled bundles
+*.tar.gz
+*.zip
+
+# Credentials — never commit these
+.Renviron
+secrets.R
+credentials.R
+
+# OS
+.DS_Store
+Thumbs.db
